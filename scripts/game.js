@@ -5,11 +5,10 @@ let game = {
     turnNumber: 0,
     lastButton: "",
     turnInProgress: false,
-    playerName: "",
+    initials: "AAA",
     choices: ["button1", "button2", "button3", "button4"],
 };
 
-const SCOREBOARD_KEY = "simonScoreboard";
 
 // --- Difficulty --------------------------------------------------------------
 // Playback speeds up as the score climbs, with a floor so it stays playable.
@@ -62,65 +61,134 @@ function playSound(circ) {
 }
 
 // --- Leaderboard -------------------------------------------------------------
-// A single global, persistent board: one entry per player, holding their best
-// score ever. Stored in localStorage so it survives reloads.
-function loadScores() {
+// The board lives on the CritticWars arcade API: one entry per set of initials,
+// holding their best score. The hosting page may point the game at a different
+// endpoint (and add fetch options such as credentials or headers) by defining
+// SIMON_CONFIG before this script loads.
+const DEFAULT_SCORES_URL = "https://critticwars.com/api/arcade/simon/scores";
+const DEFAULT_INITIALS = "AAA";
+const INITIALS_KEY = "simonInitials";
+
+function scoresUrl() {
+    return (typeof SIMON_CONFIG !== "undefined" && SIMON_CONFIG.scoresUrl) || DEFAULT_SCORES_URL;
+}
+
+function fetchOptions(options) {
+    let base = typeof SIMON_CONFIG !== "undefined" ? SIMON_CONFIG.fetchOptions || {} : {};
+    return Object.assign({}, base, options, {
+        headers: Object.assign({ Accept: "application/json" }, base.headers, options.headers),
+    });
+}
+
+// Initials are exactly three letters, always upper-case, like an arcade
+// cabinet. Anything that doesn't yield three letters falls back to AAA so a
+// blank or mistyped entry never blocks a game.
+function normaliseInitials(raw) {
+    let letters = String(raw || "").toUpperCase().replace(/[^A-Z]/g, "");
+    return letters.length >= 3 ? letters.slice(0, 3) : DEFAULT_INITIALS;
+}
+
+function rememberInitials(initials) {
     try {
-        return JSON.parse(localStorage.getItem(SCOREBOARD_KEY)) || [];
+        localStorage.setItem(INITIALS_KEY, initials);
     } catch (e) {
-        return [];
+        // storage unavailable (e.g. private browsing) — nothing to remember
     }
 }
 
-function saveScore(name, score) {
-    let scores = loadScores();
-    let player = (name || "Anonymous").trim() || "Anonymous";
-    let existing = scores.find((s) => s.name === player);
-    if (existing) {
-        if (score > existing.score) existing.score = score;
-    } else {
-        scores.push({ name: player, score: score });
-    }
+function recallInitials() {
     try {
-        localStorage.setItem(SCOREBOARD_KEY, JSON.stringify(scores));
+        return localStorage.getItem(INITIALS_KEY) || "";
     } catch (e) {
-        // storage unavailable (e.g. private browsing) — the score just won't persist
+        return "";
     }
-    return scores;
 }
 
-function topScores(limit) {
-    return loadScores()
-        .slice()
-        .sort((a, b) => b.score - a.score)
-        .slice(0, limit || 10);
+async function loadScores() {
+    let response = await fetch(scoresUrl(), fetchOptions({ method: "GET" }));
+    if (!response.ok) throw new Error(`Leaderboard request failed (${response.status})`);
+    let data = await response.json();
+    return data.scores || [];
 }
 
-function clearScores() {
-    try {
-        localStorage.removeItem(SCOREBOARD_KEY);
-    } catch (e) {
-        // ignore
-    }
-    renderScoreboard();
+async function submitScore(initials, score) {
+    let response = await fetch(
+        scoresUrl(),
+        fetchOptions({
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ initials: normaliseInitials(initials), score: score }),
+        })
+    );
+    if (!response.ok) throw new Error(`Score submission failed (${response.status})`);
+    return response.json();
 }
 
-function renderScoreboard() {
+function renderScoreboard(rows, status) {
     let list = document.getElementById("scoreboard-list");
     if (!list) return;
-    let rows = topScores();
-    if (rows.length === 0) {
-        list.innerHTML = '<li class="scoreboard-empty">No scores yet — be the first!</li>';
+    if (status === "loading") {
+        list.innerHTML = '<li class="scoreboard-status">Loading…</li>';
+        return;
+    }
+    if (status === "error") {
+        list.innerHTML = '<li class="scoreboard-status">Leaderboard unavailable</li>';
+        return;
+    }
+    if (!rows || rows.length === 0) {
+        list.innerHTML = '<li class="scoreboard-status">No scores yet — be the first!</li>';
         return;
     }
     list.innerHTML = rows
         .map(
             (s, i) =>
-                `<li><span class="rank">${i + 1}</span><span class="name">${escapeHtml(
+                `<li><span class="rank">${s.rank || i + 1}</span><span class="name">${escapeHtml(
                     s.name
                 )}</span><span class="pts">${s.score}</span></li>`
         )
         .join("");
+}
+
+async function refreshScoreboard() {
+    renderScoreboard([], "loading");
+    try {
+        renderScoreboard(await loadScores());
+    } catch (e) {
+        renderScoreboard([], "error");
+    }
+}
+
+// Sends a finished game to the board and tells the player where they stand.
+// A board that can't be reached is reported, never silently dropped.
+async function recordResult(initials, score) {
+    let title = "Game over!";
+    let text;
+    try {
+        let result = await submitScore(initials, score);
+        renderScoreboard(result.scores);
+        let entry = result.entry;
+        text = entry.improved
+            ? `${initials} scored ${score}. New personal best — #${entry.rank} on the board!`
+            : `${initials} scored ${score}. Your best is still ${entry.score} (#${entry.rank}).`;
+    } catch (e) {
+        text = `${initials} scored ${score}. Couldn't reach the leaderboard, so this one wasn't recorded.`;
+    }
+    Swal.fire({ icon: "error", position: "center", title: title, text: text });
+}
+
+// Keeps the initials field to upper-case letters as the player types.
+function bindInitialsInput() {
+    let input = document.getElementById("player-initials");
+    if (!input) return;
+    input.value = recallInitials();
+    input.addEventListener("input", () => {
+        input.value = input.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3);
+    });
+}
+
+function initPage() {
+    bindInitialsInput();
+    return refreshScoreboard();
 }
 
 function escapeHtml(str) {
@@ -138,8 +206,10 @@ function newGame() {
     game.lastButton = "";
     game.turnInProgress = true;
 
-    let nameInput = document.getElementById("player-name");
-    game.playerName = nameInput ? nameInput.value.trim() || "Anonymous" : "Anonymous";
+    let input = document.getElementById("player-initials");
+    game.initials = normaliseInitials(input ? input.value : "");
+    if (input) input.value = game.initials;
+    rememberInitials(game.initials);
 
     unlockAudio();
 
@@ -155,7 +225,6 @@ function newGame() {
             circle.setAttribute("data-listener", "true");
         }
     }
-    renderScoreboard();
     showScore();
     addTurn();
 }
@@ -214,14 +283,7 @@ function playerTurn() {
         }
     } else {
         game.turnInProgress = true;
-        saveScore(game.playerName, game.score);
-        renderScoreboard();
-        Swal.fire({
-            icon: "error",
-            position: "center",
-            title: "Game over!",
-            text: `${game.playerName} scored ${game.score}. Hit New game to play again.`,
-        });
+        game.lastResult = recordResult(game.initials, game.score);
     }
 }
 
@@ -237,10 +299,13 @@ if (typeof module !== "undefined") {
         handlePlayerClick,
         getInterval,
         getLightDuration,
+        normaliseInitials,
         loadScores,
-        saveScore,
-        topScores,
-        clearScores,
+        submitScore,
+        recordResult,
         renderScoreboard,
+        refreshScoreboard,
+        bindInitialsInput,
+        initPage,
     };
 }
