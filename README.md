@@ -6,22 +6,42 @@ Live: <https://gibbo101.github.io/simon-game>
 
 ## How it works
 
-Type a name (optional), hit **New game**, and repeat the sequence back. Each
-round adds one more step, and playback speeds up as your score climbs.
+Enter your initials (three letters, arcade style), hit **New game**, and repeat
+the sequence back. Each round adds one more step, and playback speeds up as your
+score climbs.
 
-- **Global leaderboard** — one persistent board showing each player's best score
-  ever, ranked high to low. Stored in the browser's `localStorage`, so it
-  survives reloads. Play as many times as you like; only your best is kept, and
-  nobody is ever blocked.
+- **Global leaderboard** — one shared board for everyone, served by the
+  CritticWars arcade API (`/api/arcade/simon/scores`). Each set of initials
+  holds its best score ever, ranked high to low. Play as many times as you
+  like; only your best is kept, and nobody is ever blocked. Blank or too-short
+  initials play as `AAA`.
+- Your initials are remembered in the browser between visits.
 - Every game is a fresh random sequence, so there's nothing to memorise and
   replay for a fake high score.
 
-> The leaderboard lives in `localStorage`, so it's per-browser and honour-system
-> — great for a shared standup screen, not an authoritative record.
+> The score is still counted in the browser, so the board is honour-system: the
+> API validates and rate-limits, but can't prove a run happened. Fine for
+> bragging rights, not an authoritative record.
+
+## Hosting the game elsewhere
+
+The page can be pointed at a different board (for example an authenticated,
+per-player board inside CritticWars) by defining `SIMON_CONFIG` before
+`scripts/game.js` loads:
+
+```html
+<script>
+    window.SIMON_CONFIG = {
+        scoresUrl: "/api/arcade/simon/players",
+        fetchOptions: { credentials: "same-origin", headers: { "X-CSRF-TOKEN": token } },
+    };
+</script>
+<script src="scripts/game.js"></script>
+```
 
 ## Features
 
-- Persistent global high-score board (`localStorage`)
+- Shared global high-score board with three-letter initials (CritticWars arcade API)
 - Audio tones per button (Web Audio API — no asset files)
 - Difficulty ramp: playback speeds up as your score climbs
 - Keyboard accessible: Tab to a button, Enter/Space to press it

@@ -4,10 +4,22 @@
 
 const {
     game, newGame, showScore, addTurn, lightsOn, showTurns, playerTurn,
-    getInterval, getLightDuration, saveScore, topScores, loadScores,
+    getInterval, getLightDuration, normaliseInitials, loadScores, submitScore,
+    recordResult, renderScoreboard, refreshScoreboard, bindInitialsInput, initPage,
 } = require("../game");
 
 global.Swal = { fire: jest.fn(() => new Promise(() => { })) };
+
+// The leaderboard API is mocked at the fetch level; each test decides what
+// the server answers.
+function jsonResponse(body, status = 200) {
+    return Promise.resolve({ ok: status < 400, status: status, json: () => Promise.resolve(body) });
+}
+
+beforeEach(() => {
+    global.fetch = jest.fn(() => jsonResponse({ game: "simon", board: "public", scores: [] }));
+    Swal.fire.mockClear();
+});
 
 beforeAll(() => {
     let fs = require("fs");
@@ -111,9 +123,10 @@ describe("gameplay works correctly", () => {
         playerTurn();
         expect(game.score).toBe(1);
     });
-    test("should call Swal.fire if the move is wrong", () => {
+    test("should call Swal.fire once the wrong move has been reported", async () => {
         game.playerMoves.push("wrong");
         playerTurn();
+        await game.lastResult;
         expect(Swal.fire).toHaveBeenCalled();
     });
     test("should block clicks in the pause before the next sequence plays", () => {
@@ -150,41 +163,130 @@ describe("difficulty ramp", () => {
     });
 });
 
-describe("global leaderboard", () => {
-    beforeEach(() => {
+describe("initials", () => {
+    test("are upper-cased and trimmed to three letters", () => {
+        expect(normaliseInitials("lrg")).toBe("LRG");
+        expect(normaliseInitials(" l-r g ")).toBe("LRG");
+        expect(normaliseInitials("lrgx")).toBe("LRG");
+    });
+    test("fall back to AAA when fewer than three letters are given", () => {
+        expect(normaliseInitials("")).toBe("AAA");
+        expect(normaliseInitials("lr")).toBe("AAA");
+        expect(normaliseInitials("l1g")).toBe("AAA");
+        expect(normaliseInitials(undefined)).toBe("AAA");
+    });
+    test("the input only ever holds upper-case letters", () => {
+        let input = document.getElementById("player-initials");
+        bindInitialsInput();
+        input.value = "a1b-c2d";
+        input.dispatchEvent(new Event("input"));
+        expect(input.value).toBe("ABC");
+    });
+    test("a new game reads the initials from the input and remembers them", () => {
         localStorage.clear();
+        document.getElementById("player-initials").value = "grc";
+        newGame();
+        expect(game.initials).toBe("GRC");
+        expect(document.getElementById("player-initials").value).toBe("GRC");
+        expect(localStorage.getItem("simonInitials")).toBe("GRC");
     });
-    test("saveScore records a player's result", () => {
-        saveScore("Ada", 7);
-        expect(loadScores()).toContainEqual({ name: "Ada", score: 7 });
+    test("remembered initials are restored on load", () => {
+        localStorage.setItem("simonInitials", "ADA");
+        document.getElementById("player-initials").value = "";
+        bindInitialsInput();
+        expect(document.getElementById("player-initials").value).toBe("ADA");
     });
-    test("a player keeps only their best score across replays", () => {
-        saveScore("Ada", 3);
-        saveScore("Ada", 9);
-        saveScore("Ada", 5);
-        let ada = loadScores().filter((s) => s.name === "Ada");
-        expect(ada).toHaveLength(1);
-        expect(ada[0].score).toBe(9);
+});
+
+describe("global leaderboard", () => {
+    const rows = [
+        { rank: 1, name: "GRC", score: 9 },
+        { rank: 2, name: "ADA", score: 3 },
+    ];
+
+    test("loads the board from the arcade api", async () => {
+        fetch.mockImplementationOnce(() => jsonResponse({ game: "simon", board: "public", scores: rows }));
+        await expect(loadScores()).resolves.toEqual(rows);
+        expect(fetch.mock.calls[0][0]).toBe("https://critticwars.com/api/arcade/simon/scores");
+        expect(fetch.mock.calls[0][1].method).toBe("GET");
     });
-    test("a blank name is recorded as Anonymous and is never blocked", () => {
-        saveScore("", 4);
-        saveScore("   ", 6);
-        let anon = loadScores().filter((s) => s.name === "Anonymous");
-        expect(anon).toHaveLength(1);
-        expect(anon[0].score).toBe(6);
+    test("renders ranked entries", () => {
+        renderScoreboard(rows);
+        let items = document.querySelectorAll("#scoreboard-list li");
+        expect(items).toHaveLength(2);
+        expect(items[0].querySelector(".rank").textContent).toBe("1");
+        expect(items[0].querySelector(".name").textContent).toBe("GRC");
+        expect(items[0].querySelector(".pts").textContent).toBe("9");
     });
-    test("topScores ranks all players high to low", () => {
-        saveScore("Ada", 3);
-        saveScore("Grace", 9);
-        saveScore("Alan", 5);
-        expect(topScores().map((s) => s.name)).toEqual(["Grace", "Alan", "Ada"]);
+    test("escapes anything the server sends as a name", () => {
+        renderScoreboard([{ rank: 1, name: "<b>", score: 1 }]);
+        expect(document.querySelector("#scoreboard-list .name").innerHTML).toBe("&lt;b&gt;");
     });
-    test("a wrong move saves the score to the global board", () => {
-        game.playerName = "Grace";
+    test("shows an empty message when nobody has played", async () => {
+        await refreshScoreboard();
+        expect(document.getElementById("scoreboard-list").textContent).toMatch(/No scores yet/);
+    });
+    test("shows an unavailable message when the api cannot be reached", async () => {
+        fetch.mockImplementationOnce(() => Promise.reject(new Error("offline")));
+        await refreshScoreboard();
+        expect(document.getElementById("scoreboard-list").textContent).toMatch(/unavailable/);
+    });
+    test("submits initials and score as json", async () => {
+        fetch.mockImplementationOnce(() =>
+            jsonResponse({ entry: { name: "LRG", score: 4, rank: 1, improved: true }, scores: rows }, 201)
+        );
+        await submitScore("lrg", 4);
+        let [url, options] = fetch.mock.calls[0];
+        expect(url).toBe("https://critticwars.com/api/arcade/simon/scores");
+        expect(options.method).toBe("POST");
+        expect(options.headers["Content-Type"]).toBe("application/json");
+        expect(JSON.parse(options.body)).toEqual({ initials: "LRG", score: 4 });
+    });
+    test("a wrong move sends the score to the board and reports the rank", async () => {
+        fetch.mockImplementationOnce(() =>
+            jsonResponse({ entry: { name: "GRC", score: 4, rank: 2, improved: true }, scores: rows }, 201)
+        );
+        game.initials = "GRC";
         game.score = 4;
         game.currentGame = ["button1"];
         game.playerMoves = ["button2"];
         playerTurn();
-        expect(loadScores()).toContainEqual({ name: "Grace", score: 4 });
+        await game.lastResult;
+        expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ initials: "GRC", score: 4 });
+        expect(Swal.fire.mock.calls[0][0].text).toMatch(/GRC scored 4.*#2/);
+        expect(document.querySelectorAll("#scoreboard-list li")).toHaveLength(2);
+    });
+    test("a run that does not beat the personal best says so", async () => {
+        fetch.mockImplementationOnce(() =>
+            jsonResponse({ entry: { name: "GRC", score: 9, rank: 1, improved: false }, scores: rows }, 200)
+        );
+        await recordResult("GRC", 2);
+        expect(Swal.fire.mock.calls[0][0].text).toMatch(/best is still 9/);
+    });
+    test("an unreachable board is reported rather than silently dropped", async () => {
+        fetch.mockImplementationOnce(() => jsonResponse({ message: "Too Many Attempts." }, 429));
+        await recordResult("GRC", 2);
+        expect(Swal.fire.mock.calls[0][0].text).toMatch(/wasn't recorded/);
+    });
+    test("the hosting page can point the game at another board", async () => {
+        global.SIMON_CONFIG = {
+            scoresUrl: "/api/arcade/simon/players",
+            fetchOptions: { credentials: "same-origin", headers: { "X-CSRF-TOKEN": "abc" } },
+        };
+        try {
+            await loadScores();
+            let [url, options] = fetch.mock.calls[0];
+            expect(url).toBe("/api/arcade/simon/players");
+            expect(options.credentials).toBe("same-origin");
+            expect(options.headers["X-CSRF-TOKEN"]).toBe("abc");
+            expect(options.headers.Accept).toBe("application/json");
+        } finally {
+            delete global.SIMON_CONFIG;
+        }
+    });
+    test("initPage restores initials and loads the board", async () => {
+        fetch.mockImplementationOnce(() => jsonResponse({ game: "simon", board: "public", scores: rows }));
+        await initPage();
+        expect(document.querySelectorAll("#scoreboard-list li")).toHaveLength(2);
     });
 });

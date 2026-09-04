@@ -32,16 +32,21 @@
                 <div class="scorebox" id="score" aria-live="polite">0</div>
             </div>
             <div class="controls">
-                <input type="text" id="player-name" class="name-input" placeholder="Your name" maxlength="20"
-                    aria-label="Your name">
+                <div class="initials-field">
+                    <label for="player-initials" class="initials-label">Name</label>
+                    <input type="text" id="player-initials" class="initials-input" placeholder="AAA" maxlength="3"
+                        autocapitalize="characters" autocomplete="off" spellcheck="false"
+                        aria-describedby="initials-hint">
+                    <span id="initials-hint" class="initials-hint">3 letters</span>
+                </div>
                 <button class="button" onclick="newGame()">New game</button>
             </div>
         </div>
 
         <aside class="scoreboard" aria-label="Leaderboard">
             <h3>Leaderboard</h3>
-            <ol id="scoreboard-list" class="scoreboard-list">
-                <li class="scoreboard-empty">No scores yet — be the first!</li>
+            <ol id="scoreboard-list" class="scoreboard-list" aria-live="polite">
+                <li class="scoreboard-status">Loading…</li>
             </ol>
         </aside>
     </div>
@@ -49,11 +54,11 @@
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     <script src="scripts/game.js"></script>
     <script>
-        // Render any existing scores as soon as the page loads. Guarded so the
-        // Jest/jsdom environment (where these live in a module, not globals)
-        // doesn't throw while parsing index.html.
-        if (typeof renderScoreboard === "function") {
-            renderScoreboard();
+        // Load the board and the remembered initials as soon as the page loads.
+        // Guarded so the Jest/jsdom environment (where these live in a module,
+        // not globals) doesn't throw while parsing index.html.
+        if (typeof initPage === "function") {
+            initPage();
         }
     </script>
 </body>
